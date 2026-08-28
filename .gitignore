@@ -1,0 +1,19 @@
+# Python cache and local tooling
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# Local secrets and environment files
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+
+# Runtime output
+islem_gecmisi.xlsx
+*.log
