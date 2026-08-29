@@ -88,6 +88,12 @@ pytest tests/ -v
 
 ---
 
+## 🗺️ Geliştirme Yol Haritası (Roadmap)
+
+Projenin tamamlanan fazları ve kripto vadeli işlemler için planlanan en yüksek F/P (Fiyat/Performans) **%50 Kısmi TP + Moonbag Trailing Stop** stratejisi detayları için [ROADMAP.md](file:///c:/Users/yasin/OneDrive/Belgeler/Projects/Binance-reverse-Trade-Bot/ROADMAP.md) belgesini inceleyebilirsiniz.
+
+---
+
 ## Güvenlik Notları
 
 - API anahtarlarınızı asla GitHub'a veya harici ortamlara göndermeyin (`.env` ve `islem_gecmisi.xlsx` dosyaları `.gitignore` ile korunmaktadır).
