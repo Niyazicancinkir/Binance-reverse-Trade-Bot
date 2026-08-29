@@ -42,7 +42,6 @@ def test_islemi_excel_kaydet_ve_acik_pozisyon(temp_excel):
     assert df.iloc[0]["TP Emir ID"] == "tp_456"
 
 def test_excel_pnl_ve_tp_kapanis(temp_excel):
-    # Pozisyon ekle
     islemi_excel_kaydet(
         parite="SOL/USDT",
         yon="LONG",
@@ -57,8 +56,10 @@ def test_excel_pnl_ve_tp_kapanis(temp_excel):
         dosya_yolu=temp_excel
     )
     
-    # Mock borsa istemcisi: TP emrinin gerçekleştiğini (filled) bildirsin
+    # Mock borsa istemcisi: Pozisyon borsada kapanmış (contracts: 0) ve anlık fiyat 120 (TP seviyesi)
     mock_borsa = MagicMock()
+    mock_borsa.fetch_positions.return_value = []
+    mock_borsa.fetch_ticker.return_value = {"last": 120.0}
     mock_borsa.fetch_order.side_effect = lambda order_id, symbol: {
         "id": order_id,
         "status": "filled" if order_id == "tp_sol_1" else "open",
@@ -69,7 +70,7 @@ def test_excel_pnl_ve_tp_kapanis(temp_excel):
     
     df = pd.read_excel(temp_excel)
     assert df.iloc[0]["Durum"] == "Kapalı - TP Tetiklendi"
-    assert df.iloc[0]["Anlık Fiyat"] == 120.0
+    assert float(df.iloc[0]["Anlık Fiyat"]) == 120.0
     assert df.iloc[0]["Kâr/Zarar ($)"] == "$20.00"
     assert not paritede_acik_pozisyon_var_mi("SOL/USDT", dosya_yolu=temp_excel)
 
@@ -90,6 +91,7 @@ def test_excel_oto_onarim_eksik_tp_sl(temp_excel):
     )
 
     mock_borsa = MagicMock()
+    mock_borsa.fetch_positions.return_value = [{'symbol': 'AVAX/USDT:USDT', 'contracts': 1.0}]
     mock_borsa.fetch_ticker.return_value = {"last": 20.0}
     mock_borsa.price_to_precision.side_effect = lambda sym, p: f"{p:.4f}"
     mock_borsa.create_order.side_effect = lambda symbol, type, side, amount, params: {

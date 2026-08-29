@@ -77,9 +77,9 @@ def paritede_acik_pozisyon_var_mi(parite: str, dosya_yolu: str = None) -> bool:
 
 def excel_kar_zarar_guncelle(borsa_istemcisi, dosya_yolu: str = None):
     """
-    Binance üzerinden açık pozisyonların TP/SL durumunu ve anlık fiyatını denetler.
-    Eksik kalan TP/SL emirlerini otomatik tespit edip borsaya iletir (Oto-Onarım).
-    Kapanan pozisyonları 'Kapalı' olarak günceller ve net PnL hesaplar.
+    Binance üzerinden açık pozisyonları sorgular (fetch_positions).
+    Borsada kapanan pozisyonları 'Kapalı' olarak günceller ve net PnL hesaplar.
+    Açık kalan pozisyonlar için eksik TP/SL emirlerini tamamlar ve canlı PnL günceller.
     """
     hedef_dosya = get_excel_path(dosya_yolu)
     if not os.path.exists(hedef_dosya):
@@ -95,12 +95,25 @@ def excel_kar_zarar_guncelle(borsa_istemcisi, dosya_yolu: str = None):
     if df.empty:
         return
 
+    # 1. Binance üzerindeki tüm canlı açık pozisyonları al
+    acik_borsa_pozisyonlari = {}
+    if borsa_istemcisi is not None:
+        try:
+            positions = borsa_istemcisi.fetch_positions()
+            for p in positions:
+                contracts = float(p.get('contracts', 0) or 0)
+                if contracts > 0:
+                    sym = p.get('symbol', '').split(':')[0].strip().upper()
+                    acik_borsa_pozisyonlari[sym] = p
+        except Exception as e:
+            print(f"[EXCEL_UYARI] Borsa açık pozisyonları sorgulanamadı: {e}")
+
     degisiklik_oldu = False
     
     for idx, row in df.iterrows():
         if str(row.get("Durum")) == "Açık":
             try:
-                parite = str(row["Parite"])
+                parite = str(row["Parite"]).strip().upper()
                 yon = str(row["İşlem Yönü"]).upper()
                 giris = float(row["Giriş Fiyatı"])
                 miktar = float(row.get("Miktar", 0.05))
@@ -109,94 +122,107 @@ def excel_kar_zarar_guncelle(borsa_istemcisi, dosya_yolu: str = None):
                 hedef_tp = float(row["Hedef TP"]) if str(row.get("Hedef TP")) not in ["-", "nan", "None"] else None
                 zarar_sl = float(row["Zarar Kes SL"]) if str(row.get("Zarar Kes SL")) not in ["-", "nan", "None"] else None
 
-                # 1. Oto-Koruma: Açık pozisyonda TP veya SL eksikse otomatik borsaya kur
-                if borsa_istemcisi is not None and (tp_id in ["-", "None", "", "nan"] or sl_id in ["-", "None", "", "nan"]):
+                # 2. Anlık fiyatı çek
+                anlik_fiyat = None
+                if borsa_istemcisi is not None:
                     try:
-                        from binance import eksik_tp_sl_tamamla
-                        onarim = eksik_tp_sl_tamamla(
-                            client=borsa_istemcisi,
-                            coin_pair=parite,
-                            yon=yon,
-                            miktar=miktar,
-                            giris_fiyati=giris,
-                            tp_hedef=hedef_tp,
-                            sl_hedef=zarar_sl,
-                            tp_id=tp_id,
-                            sl_id=sl_id
-                        )
-                        if onarim.get("guncellendi"):
-                            tp_id = str(onarim.get("tp_id", tp_id))
-                            sl_id = str(onarim.get("sl_id", sl_id))
-                            df.at[idx, "TP Emir ID"] = tp_id
-                            df.at[idx, "SL Emir ID"] = sl_id
-                            if onarim.get("tp_fiyat"):
-                                df.at[idx, "Hedef TP"] = str(onarim["tp_fiyat"])
-                            if onarim.get("sl_fiyat"):
-                                df.at[idx, "Zarar Kes SL"] = str(onarim["sl_fiyat"])
-                            degisiklik_oldu = True
-                    except Exception as e:
-                        print(f"[EXCEL_UYARI] {parite} için oto-onarım çağrılamadı: {e}")
-
-                # 2. Borsa üzerinden TP veya SL emirlerinin dolup dolmadığını kontrol et
-                pozisyon_kapandi = False
-                kapanis_nedeni = ""
-                kapanis_fiyati = None
-
-                if tp_id and tp_id not in ["-", "nan", "None"] and borsa_istemcisi is not None:
-                    try:
-                        tp_order = borsa_istemcisi.fetch_order(tp_id, parite)
-                        if tp_order and tp_order.get('status') in ['closed', 'filled']:
-                            pozisyon_kapandi = True
-                            kapanis_nedeni = "Kapalı - TP Tetiklendi"
-                            kapanis_fiyati = float(tp_order.get('average') or hedef_tp or giris)
+                        ticker = borsa_istemcisi.fetch_ticker(parite)
+                        anlik_fiyat = float(ticker['last'])
                     except Exception:
                         pass
-
-                if not pozisyon_kapandi and sl_id and sl_id not in ["-", "nan", "None"] and borsa_istemcisi is not None:
-                    try:
-                        sl_order = borsa_istemcisi.fetch_order(sl_id, parite)
-                        if sl_order and sl_order.get('status') in ['closed', 'filled']:
-                            pozisyon_kapandi = True
-                            kapanis_nedeni = "Kapalı - SL Tetiklendi"
-                            kapanis_fiyati = float(sl_order.get('average') or zarar_sl or giris)
-                    except Exception:
-                        pass
-
-                # 3. Anlık fiyatı çek ve PnL hesapla
-                anlik_fiyat = kapanis_fiyati
-                if anlik_fiyat is None and borsa_istemcisi is not None:
-                    ticker = borsa_istemcisi.fetch_ticker(parite)
-                    anlik_fiyat = float(ticker['last'])
 
                 if anlik_fiyat is not None:
                     df.at[idx, "Anlık Fiyat"] = anlik_fiyat
 
-                    # PnL Hesaplama
+                # 3. Pozisyon Borsada Açık mı Kapandı mı?
+                borsada_hala_acik = (parite in acik_borsa_pozisyonlari) if borsa_istemcisi is not None else True
+
+                if not borsada_hala_acik and borsa_istemcisi is not None:
+                    # Pozisyon borsada kapanmış (TP veya SL tetiklendi)
+                    kapanis_nedeni = "Kapalı"
+                    kapanis_fiyati = anlik_fiyat or giris
+
+                    if hedef_tp and anlik_fiyat:
+                        if yon == "LONG" and anlik_fiyat >= hedef_tp * 0.998:
+                            kapanis_nedeni = "Kapalı - TP Tetiklendi"
+                            kapanis_fiyati = hedef_tp
+                        elif yon == "SHORT" and anlik_fiyat <= hedef_tp * 1.002:
+                            kapanis_nedeni = "Kapalı - TP Tetiklendi"
+                            kapanis_fiyati = hedef_tp
+
+                    if zarar_sl and anlik_fiyat and kapanis_nedeni == "Kapalı":
+                        if yon == "LONG" and anlik_fiyat <= zarar_sl * 1.002:
+                            kapanis_nedeni = "Kapalı - SL Tetiklendi"
+                            kapanis_fiyati = zarar_sl
+                        elif yon == "SHORT" and anlik_fiyat >= zarar_sl * 0.998:
+                            kapanis_nedeni = "Kapalı - SL Tetiklendi"
+                            kapanis_fiyati = zarar_sl
+
+                    if kapanis_nedeni == "Kapalı":
+                        kapanis_nedeni = "Kapalı - Borsa Emri Doldu"
+
+                    # Net Realize PnL Hesapla
                     if yon == "LONG":
-                        pnl_yuzde = ((anlik_fiyat - giris) / giris) * 100
-                        fark = anlik_fiyat - giris
-                    else:  # SHORT
-                        pnl_yuzde = ((giris - anlik_fiyat) / giris) * 100
-                        fark = giris - anlik_fiyat
-                        
-                    pnl_dolar = fark * miktar
-                    
+                        pnl_yuzde = ((kapanis_fiyati - giris) / giris) * 100
+                        pnl_dolar = (kapanis_fiyati - giris) * miktar
+                    else:
+                        pnl_yuzde = ((giris - kapanis_fiyati) / giris) * 100
+                        pnl_dolar = (giris - kapanis_fiyati) * miktar
+
+                    df.at[idx, "Durum"] = kapanis_nedeni
+                    df.at[idx, "Anlık Fiyat"] = kapanis_fiyati
+                    df.at[idx, "Kapanış Fiyatı"] = str(round(kapanis_fiyati, 4))
+                    df.at[idx, "Kapanış Tarihi"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     df.at[idx, "Kâr/Zarar (%)"] = f"%{pnl_yuzde:.2f}"
                     df.at[idx, "Kâr/Zarar ($)"] = f"${pnl_dolar:.2f}"
-                    
-                    # 4. Kapanış verilerini yaz
-                    if pozisyon_kapandi:
-                        df.at[idx, "Durum"] = kapanis_nedeni
-                        df.at[idx, "Kapanış Fiyatı"] = str(round(anlik_fiyat, 4))
-                        df.at[idx, "Kapanış Tarihi"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        print(f"[EXCEL] {parite} pozisyonu kapandı: {kapanis_nedeni} (PnL: ${pnl_dolar:.2f})")
-                        
+
+                    print(f"[EXCEL] {parite} ({yon}) pozisyonu kapandı: {kapanis_nedeni} (PnL: ${pnl_dolar:.2f} / %{pnl_yuzde:.2f})")
                     degisiklik_oldu = True
 
+                else:
+                    # Pozisyon hala açık: Anlık PnL hesapla & Eksik TP/SL varsa kur
+                    if anlik_fiyat is not None:
+                        if yon == "LONG":
+                            pnl_yuzde = ((anlik_fiyat - giris) / giris) * 100
+                            pnl_dolar = (anlik_fiyat - giris) * miktar
+                        else:
+                            pnl_yuzde = ((giris - anlik_fiyat) / giris) * 100
+                            pnl_dolar = (giris - anlik_fiyat) * miktar
+
+                        df.at[idx, "Kâr/Zarar (%)"] = f"%{pnl_yuzde:.2f}"
+                        df.at[idx, "Kâr/Zarar ($)"] = f"${pnl_dolar:.2f}"
+                        degisiklik_oldu = True
+
+                    # Eksik TP/SL varsa tamamla
+                    if borsa_istemcisi is not None and (tp_id in ["-", "None", "", "nan"] or sl_id in ["-", "None", "", "nan"]):
+                        try:
+                            from binance import eksik_tp_sl_tamamla
+                            onarim = eksik_tp_sl_tamamla(
+                                client=borsa_istemcisi,
+                                coin_pair=parite,
+                                yon=yon,
+                                miktar=miktar,
+                                giris_fiyati=giris,
+                                tp_hedef=hedef_tp,
+                                sl_hedef=zarar_sl,
+                                tp_id=tp_id,
+                                sl_id=sl_id
+                            )
+                            if onarim.get("guncellendi"):
+                                df.at[idx, "TP Emir ID"] = str(onarim.get("tp_id", tp_id))
+                                df.at[idx, "SL Emir ID"] = str(onarim.get("sl_id", sl_id))
+                                if onarim.get("tp_fiyat"):
+                                    df.at[idx, "Hedef TP"] = str(onarim["tp_fiyat"])
+                                if onarim.get("sl_fiyat"):
+                                    df.at[idx, "Zarar Kes SL"] = str(onarim["sl_fiyat"])
+                                degisiklik_oldu = True
+                        except Exception as e:
+                            print(f"[EXCEL_UYARI] {parite} için oto-onarım çağrılamadı: {e}")
+
             except Exception as e:
-                print(f"[EXCEL_GUNCELLEME_HATA] {row.get('Parite')} için fiyat/emir güncellenemedi: {e}")
+                print(f"[EXCEL_GUNCELLEME_HATA] {row.get('Parite')} güncellenemedi: {e}")
 
     if degisiklik_oldu:
         df = _tipleri_duzenle(df)
         df.to_excel(hedef_dosya, index=False)
-        print("[EXCEL] PnL ve emir durumları başarıyla güncellendi.")
+        print("[EXCEL] PnL ve pozisyon kapanışları başarıyla güncellendi.")
